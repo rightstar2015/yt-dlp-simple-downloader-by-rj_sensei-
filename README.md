@@ -1,2 +1,28 @@
-# yt-dlp-simple-downloader-by-rj_sensei-
+# yt-dlp Simple Downloader v1.0.0
+
 這是一款簡單的影片下載器，透過yt-dlp達成的，我只是把它做成一個可方便使用的GUI，主要工作由Claude AI完成的
+
+## 功能特性
+- 📱 **簡單模式** - MP4/MP3/M4A 一鍵下載
+- 🎯 **進階模式** - 自由選擇格式組合
+- ⏱️ **片段下載** - 按時間戳下載
+- 🔄 **自動更新** - 一鍵更新 yt-dlp
+- 📊 **進度顯示** - 實時 ETA 顯示
+
+## 系統需求
+- Windows 10 或更高版本
+- 無需安裝 Python（EXE 已包含）
+
+## 使用方法
+1. 下載 `yt-dlp-downloader.exe`
+2. 雙擊運行
+3. 貼上影片連結，按下載
+
+## 反饋
+- X（Twitter）：@rj_sensei_
+- 問題報告：在此 Issue 區留言
+
+-任何人都可以從中修改原代碼，並且不需要備註我(主項目本身就是開源的)
+
+---
+非常感謝你的使用！
