@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 APP_DATA_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "yt-dlp-gui"
 PROJECT_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 YT_DLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
@@ -31,6 +31,9 @@ class DownloadRequest:
     start: str = ""
     end: str = ""
     ffmpeg_dir: str = ""
+    chat: bool = False
+    chat_only: bool = False
+    chat_text: bool = True
 
 
 def validate_url(value, playlist=False):
@@ -76,9 +79,13 @@ def validate_request(request, info=None):
     validate_name(request.name)
     if request.mode not in ("mp4", "mp3", "m4a", "advanced"):
         raise ValueError("下載格式不正確。")
-    if request.playlist and request.mode == "advanced":
+    if request.chat_only and not request.chat:
+        raise ValueError("「只下載聊天室」需要先勾選「下載直播聊天室紀錄」。")
+    if request.chat_only and request.clip:
+        raise ValueError("聊天室紀錄只能完整下載，請改用全片下載。")
+    if request.playlist and request.mode == "advanced" and not request.chat_only:
         raise ValueError("播放清單請使用簡單模式，避免各影片的格式 ID 不一致。")
-    if request.mode == "advanced":
+    if request.mode == "advanced" and not request.chat_only:
         if not request.video_id and not request.audio_id:
             raise ValueError("請先取得格式清單，選擇影片或音訊格式。")
         for format_id in (request.video_id, request.audio_id):
@@ -137,6 +144,8 @@ def resolve_tools(custom_ffmpeg=""):
 
 
 def needs_ffmpeg(request):
+    if request.chat_only:
+        return False
     return (request.clip or request.mode in ("mp4", "mp3", "m4a")
             or (request.merge and bool(request.video_id and request.audio_id)))
 
@@ -155,7 +164,7 @@ def build_download_command(request, tools, info=None):
     cmd = base_command(tools["yt-dlp"], request.playlist)
     if not request.playlist:
         cmd += ["--playlist-items", "1"]
-    separated = request.mode == "advanced" and not request.merge
+    separated = request.mode == "advanced" and not request.merge and not request.chat_only
     stem = request.name.replace("%", "%%") if request.name else "%(title)s [%(id)s]"
     if request.playlist:
         stem = "%(playlist_index)03d - " + stem
@@ -171,14 +180,19 @@ def build_download_command(request, tools, info=None):
             "--print", "after_move:GUI_FILE:%(filepath)j"]
     if tools.get("ffmpeg"):
         cmd += ["--ffmpeg-location", str(Path(tools["ffmpeg"]).parent)]
-    if request.mode == "mp4":
+    if request.chat:
+        # YouTube 直播／首播的聊天室在 yt-dlp 中是名為 live_chat 的字幕軌。
+        cmd += ["--write-subs", "--sub-langs", "live_chat"]
+    if request.chat_only:
+        cmd += ["--skip-download"]
+    elif request.mode == "mp4":
         cmd += ["-f", MP4_FORMAT, "--merge-output-format", "mp4", "--remux-video", "mp4"]
     elif request.mode in ("mp3", "m4a"):
         cmd += ["-f", "ba/b", "-x", "--audio-format", request.mode]
     else:
         selected = [value for value in (request.video_id, request.audio_id) if value]
         cmd += ["-f", ("," if separated else "+").join(selected)]
-    if request.clip:
+    if request.clip and not request.chat_only:
         cmd += ["--download-sections", f"*{request.start}-{request.end or 'inf'}"]
     cmd += ["--", request.url.strip()]
     return cmd
@@ -211,6 +225,8 @@ def format_size(size):
 
 
 def estimate_size(request, info):
+    if request.chat_only:
+        return "只下載聊天室：大小依留言數量而定"
     if not info or request.playlist:
         return "大小待取得影片資訊" if not request.playlist else "播放清單：各影片分別顯示進度"
     video, audio = available_formats(info)

@@ -1,5 +1,6 @@
 """Offline regression suite, real Qt event loop and real child-process checks."""
 from dataclasses import replace
+from datetime import datetime
 import io
 import json
 import os
@@ -17,6 +18,7 @@ from PyQt5 import QtCore, QtWidgets
 import requests
 import downloader_core as core
 from downloader_workers import TaskWorker
+import live_chat
 import main
 
 
@@ -28,6 +30,27 @@ INFO = {"id": "sample", "title": "測試影片", "duration": 100, "formats": [
     {"format_id": "protected", "vcodec": "avc1", "acodec": "none", "has_drm": True},
 ]}
 TOOLS = {"yt-dlp": "yt-dlp.exe", "ffmpeg": "C:/tools/ffmpeg.exe", "ffprobe": "C:/tools/ffprobe.exe"}
+
+
+def chat_action(kind, **renderer):
+    renderer.setdefault("authorName", {"simpleText": "@viewer"})
+    renderer.setdefault("timestampUsec", "1793064797000000")
+    return {"addChatItemAction": {"item": {kind: renderer}}}
+
+
+# 與 yt-dlp 寫出的 .live_chat.json 相同：每行一個 JSON，重播的時間軸放在 replayChatItemAction 內。
+CHAT_LINES = [
+    {"replayChatItemAction": {"videoOffsetTimeMsec": "65000", "actions": [chat_action(
+        "liveChatTextMessageRenderer", message={"runs": [{"text": "hello "}, {"emoji": {"emojiId": "👋"}}]})]}},
+    {"replayChatItemAction": {"videoOffsetTimeMsec": "3725000", "actions": [chat_action(
+        "liveChatPaidMessageRenderer", authorName={"simpleText": "@fan"}, purchaseAmountText={"simpleText": "NT$75"},
+        message={"runs": [{"text": "nice"}, {"emoji": {"isCustomEmoji": True, "emojiId": "UC/x", "shortcuts": [":_wave:"]}}]})]}},
+    {"replayChatItemAction": {"videoOffsetTimeMsec": "70000", "actions": [chat_action(
+        "liveChatMembershipItemRenderer", headerSubtext={"runs": [{"text": "Welcome to "}, {"text": "Club"}]})]}},
+    {"replayChatItemAction": {"videoOffsetTimeMsec": "71000", "actions": [
+        {"addLiveChatTickerItemAction": {"item": {"liveChatTickerPaidMessageItemRenderer": {}}}},
+        chat_action("liveChatViewerEngagementMessageRenderer")]}},
+]
 
 
 class Response:
@@ -108,6 +131,29 @@ class CoreTests(unittest.TestCase):
         for changes in ({"mode": "advanced", "video_id": "v-high"}, {"clip": True, "start": "00:00:00"}):
             with self.assertRaises(ValueError):
                 self.command(replace(self.request, playlist=True, **changes))
+
+    def test_chat_with_video_adds_live_chat_subtitle_track(self):
+        cmd = self.command(replace(self.request, chat=True))
+        self.assertEqual(cmd[cmd.index("--sub-langs") + 1], "live_chat")
+        self.assertIn("--write-subs", cmd)
+        self.assertIn("-f", cmd)
+        self.assertNotIn("--skip-download", cmd)
+
+    def test_chat_only_skips_video_formats_and_ffmpeg(self):
+        request = replace(self.request, mode="advanced", chat=True, chat_only=True, playlist=True,
+                          url="https://www.youtube.com/@channel/streams")
+        cmd = core.build_download_command(request, {"yt-dlp": "yt-dlp.exe"}, None)
+        self.assertIn("--skip-download", cmd)
+        self.assertIn("--write-subs", cmd)
+        for flag in ("-f", "--merge-output-format", "--ffmpeg-location", "--download-sections"):
+            self.assertNotIn(flag, cmd)
+        self.assertIn("聊天室", core.estimate_size(request, INFO))
+
+    def test_chat_only_rejects_clip_and_requires_chat(self):
+        for changes in ({"chat": True, "chat_only": True, "clip": True, "start": "00:00:00"},
+                        {"chat": False, "chat_only": True}):
+            with self.assertRaises(ValueError):
+                self.command(replace(self.request, **changes))
 
     def test_clip_without_end_uses_inf(self):
         cmd = self.command(replace(self.request, clip=True, start="00:00:10"))
@@ -397,6 +443,63 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(self.window.open_file_btn.isEnabled())
         self.assertTrue(any("100.0 B/s" in message for message in progress_messages))
 
+    def _chat_script(self, chat_file, live):
+        script = self.directory / "fake-chat.py"
+        lines = [json.dumps(line, ensure_ascii=False) for line in CHAT_LINES]
+        script.write_text("import json,pathlib,time\n"
+                          f"p=pathlib.Path({str(chat_file)!r})\n"
+                          f"part=pathlib.Path({str(chat_file) + '.part'!r})\n"
+                          f"lines={lines!r}\n"
+                          "print('GUI_META:'+json.dumps({'title':'stream'}),flush=True)\n"
+                          "pathlib.Path(str(part)+'-Frag3').write_text('x')\n"
+                          "with part.open('w',encoding='utf-8') as f:\n"
+                          " for line in lines:\n"
+                          "  f.write(line+'\\n'); f.flush()\n"
+                          "  print('GUI_PROGRESS:'+json.dumps({'downloaded_bytes':f.tell(),'filename':str(p)}),flush=True)\n"
+                          + (" time.sleep(60)\n" if live else "part.replace(p)\n"), encoding="utf-8")
+        return script
+
+    def test_chat_only_download_converts_chat_to_text(self):
+        chat_file = self.directory / "stream [id].live_chat.json"
+        script = self._chat_script(chat_file, live=False)
+        self.window.chat_checkbox.setChecked(True)
+        self.window.chat_only_checkbox.setChecked(True)
+        self.assertFalse(self.window.mode_group.isEnabled())
+        self.assertEqual(self.window.download_btn.text(), "下載聊天室")
+        with patch.object(core, "resolve_tools", return_value=TOOLS), patch.object(core, "build_download_command", return_value=[sys.executable, str(script)]):
+            self.window.download_video()
+            self.wait_until(lambda: self.window._worker is None)
+        text_file = self.directory / "stream [id].live_chat.txt"
+        self.assertEqual(self.window._last_files, [str(chat_file), str(text_file)])
+        self.assertIn("[0:01:05] @viewer：hello 👋", text_file.read_text(encoding="utf-8-sig"))
+
+    def test_chat_only_without_chat_track_reports_error(self):
+        script = self.directory / "no-chat.py"
+        script.write_text("print('[info] There are no subtitles for the requested languages',flush=True)\n", encoding="utf-8")
+        self.window.chat_checkbox.setChecked(True)
+        self.window.chat_only_checkbox.setChecked(True)
+        with patch.object(core, "resolve_tools", return_value=TOOLS), patch.object(core, "build_download_command", return_value=[sys.executable, str(script)]):
+            self.window.download_video()
+            self.wait_until(lambda: self.window._worker is None)
+        self.assertIn("沒有可下載的聊天室", self.window.status.text())
+
+    def test_cancelled_live_chat_recording_is_kept_and_converted(self):
+        chat_file = self.directory / "live [id].live_chat.json"
+        script = self._chat_script(chat_file, live=True)
+        self.window.chat_checkbox.setChecked(True)
+        self.window.chat_only_checkbox.setChecked(True)
+        with patch.object(core, "resolve_tools", return_value=TOOLS), patch.object(core, "build_download_command", return_value=[sys.executable, str(script)]):
+            self.window.download_video()
+            self.wait_until(lambda: self.window._worker is not None and len(self.window._worker._chat_files) == 1)
+            time.sleep(0.3)
+            self.window.cancel_task()
+            self.wait_until(lambda: self.window._worker is None)
+        self.assertTrue(chat_file.is_file())
+        self.assertFalse(Path(str(chat_file) + ".part").exists())
+        self.assertFalse(Path(str(chat_file) + ".part-Frag3").exists())
+        text = (self.directory / "live [id].live_chat.txt").read_text(encoding="utf-8-sig")
+        self.assertIn("[Super Chat NT$75] @fan：nice", text)
+
     @unittest.skipUnless(os.name == "nt", "Windows child-process tree cancellation")
     def test_cancel_kills_download_and_ffmpeg_like_child(self):
         child_pid_file = self.directory / "child.pid"
@@ -416,6 +519,38 @@ class WorkerTests(unittest.TestCase):
                                 creationflags=subprocess.CREATE_NO_WINDOW)
         self.assertNotIn('"' + child_pid + '"', result.stdout)
         self.assertTrue(self.window.download_btn.isEnabled())
+
+
+class LiveChatTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.source = Path(self.temp.name) / "video [id].live_chat.json"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def convert(self, lines, tail=""):
+        self.source.write_text("".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines) + tail,
+                               encoding="utf-8")
+        path, count = live_chat.convert_file(self.source)
+        return Path(path), count, Path(path).read_text(encoding="utf-8-sig").splitlines()
+
+    def test_replay_messages_superchats_and_members_are_readable(self):
+        path, count, lines = self.convert(CHAT_LINES)
+        self.assertEqual(path.name, "video [id].live_chat.txt")
+        self.assertEqual(count, 3)
+        self.assertEqual(lines[1:], ["[0:01:05] @viewer：hello 👋",
+                                     "[1:02:05] [Super Chat NT$75] @fan：nice:_wave:",
+                                     "[0:01:10] [會員] @viewer：Welcome to Club"])
+
+    def test_live_recording_uses_wall_clock_and_skips_truncated_line(self):
+        line = {"replayChatItemAction": {"actions": [chat_action(
+            "liveChatTextMessageRenderer", message={"simpleText": "第一行\n第二行"})]},
+            "videoOffsetTimeMsec": "-8649133", "isLive": True}
+        _, count, lines = self.convert([line], tail='{"replayChatItemAction": {"act')
+        self.assertEqual(count, 1)
+        expected = datetime.fromtimestamp(1793064797).strftime("%Y-%m-%d %H:%M:%S")
+        self.assertEqual(lines[1], f"[{expected}] @viewer：第一行 第二行")
 
 
 class StartupTests(unittest.TestCase):

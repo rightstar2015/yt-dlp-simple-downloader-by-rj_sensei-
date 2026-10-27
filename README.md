@@ -1,8 +1,17 @@
-# yt-dlp GUI Downloader 1.1.0
+# yt-dlp GUI Downloader 1.2.0
 
 by Odudins。Python／PyQt5 開發的 Windows 影音下載器，MIT License。
 
-## 本版改善
+## 1.2.0 新增：直播聊天室紀錄
+
+- 勾選「下載直播聊天室紀錄」，下載影片時一併保存 YouTube 直播／首播的聊天室（`.live_chat.json`）。
+- 勾選「只下載聊天室」可不下載影片，也不需要 FFmpeg；支援播放清單與佇列。
+- 預設另存易讀文字檔 `.live_chat.txt`：每行為 `[時間] 名稱：留言`，並標示 Super Chat／Super Sticker 金額與會員訊息。
+  重播使用影片時間軸（例如 `[1:02:05]`）；直播進行中錄下的留言使用實際時間。
+- 直播進行中請使用「只下載聊天室」，會持續記錄到直播結束；中途按「取消工作」會保留已錄到的留言並轉成文字檔。
+- 影片沒有聊天室（一般影片、聊天室關閉或重播已停用）時會明確提示；「只下載聊天室」此時視為失敗。
+
+## 1.1.0 改善
 
 - yt-dlp 更新、FFmpeg 安裝、工具檢查、影片資訊查詢、下載與轉檔全部在背景進行。
 - 啟動先顯示視窗，再檢查工具；GitHub 最新版本查詢快取 24 小時。
@@ -84,6 +93,7 @@ $env:YT_DLP_TEST_EXE = (Resolve-Path .\yt-dlp.exe).Path
 - `main.py`：GUI、設定及佇列管理。
 - `downloader_core.py`：輸入驗證、工具定位、格式資訊與命令組合。
 - `downloader_workers.py`：背景網路、下載、安裝、程序取消與安全替換。
+- `live_chat.py`：把 yt-dlp 的直播聊天室 JSON 轉成易讀文字檔。
 - `style.py`：深色介面樣式。
 - `test_update.py`：離線回歸測試。
 - `test_integration.py`：實際 yt-dlp 的本機 HTTP 整合測試。

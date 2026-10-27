@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name="yt-dlp-simple-downloader",
-    version="1.1.0",
+    version="1.2.0",
     description="Responsive Windows GUI downloader for yt-dlp",
     author="Odudins",
     url="https://github.com/rj-sensei/yt-dlp-simple-downloader",

@@ -1,5 +1,6 @@
 """Cancellable background operations; widgets are only changed by GUI slots."""
 from collections import deque
+import glob
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import zipfile
 import requests
 from PyQt5 import QtCore
 import downloader_core as core
+import live_chat
 
 
 class Cancelled(Exception):
@@ -36,6 +38,8 @@ class TaskWorker(QtCore.QThread):
         self._proc = None
         self._files = []
         self._metadata = None
+        self._chat_files = []
+        self._no_chat = False
 
     def cancel(self):
         self.cancel_event.set()
@@ -293,6 +297,10 @@ class TaskWorker(QtCore.QThread):
         if line.startswith("GUI_PROGRESS:"):
             try:
                 data = json.loads(line.split(":", 1)[1])
+                chat_file = data.get("filename") or ""
+                if chat_file.endswith(live_chat.CHAT_SUFFIX) and chat_file not in self._chat_files:
+                    self._chat_files.append(chat_file)
+                    self.status_changed.emit("正在下載聊天室紀錄（直播進行中會持續記錄到結束，可按取消停止並保留）...")
                 downloaded = data.get("downloaded_bytes") or 0
                 total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
                 percent = min(100, int(downloaded * 100 / total)) if total else -1
@@ -307,6 +315,8 @@ class TaskWorker(QtCore.QThread):
             except (ValueError, TypeError, OverflowError):
                 self.log_message.emit(line)
         elif line.startswith("GUI_POST:"):
+            if self.params["request"].chat_only:
+                return  # 只下載聊天室時沒有影音處理，只是 yt-dlp 的檔案整理步驟。
             self.status_changed.emit("正在合併／轉檔，請稍候...")
             self.progress_changed.emit(-1, "影音處理中；轉檔可能需要較長時間")
         elif line.startswith("GUI_FILE:"):
@@ -320,11 +330,46 @@ class TaskWorker(QtCore.QThread):
         elif line.startswith("GUI_META:"):
             try:
                 self._metadata = json.loads(line.split(":", 1)[1])
-                self.status_changed.emit(f"正在下載：{self._metadata.get('title', '影片')}")
+                target = "聊天室" if self.params["request"].chat_only else ""
+                self.status_changed.emit(f"正在下載{target}：{self._metadata.get('title', '影片')}")
             except (ValueError, AttributeError):
                 self.log_message.emit(line)
         elif line:
+            if "There are no subtitles for the requested languages" in line:
+                self._no_chat = True
             self.log_message.emit(line)
+
+    def _finish_chat(self, request, cancel_check=None):
+        """Turn recorded chat into final files; returns a note for the result message."""
+        if not request.chat:
+            return ""
+        outputs = []
+        for path in self._chat_files:
+            final = Path(path)
+            partial = Path(path + ".part")
+            if not final.is_file() and partial.is_file():
+                # 中斷錄製的聊天室每行仍是完整 JSON，改回正式檔名保留已錄到的留言。
+                os.replace(partial, final)
+                self.log_message.emit(f"已保留中斷前錄到的聊天室：{final}")
+            for fragment in final.parent.glob(glob.escape(final.name) + ".part-Frag*"):
+                fragment.unlink(missing_ok=True)
+            if not final.is_file():
+                continue
+            outputs.append(str(final))
+            self.log_message.emit(f"已完成聊天室紀錄：{final}")
+            if request.chat_text:
+                self.status_changed.emit("正在轉存聊天室文字檔...")
+                text_path, count = live_chat.convert_file(final, cancel_check=cancel_check)
+                outputs.append(text_path)
+                self.log_message.emit(f"已轉存 {count} 則留言：{text_path}")
+        self._files[:0] = outputs
+        if outputs:
+            return ""
+        reason = "此影片沒有可下載的聊天室紀錄（可能不是直播／首播、聊天室已關閉，或網站不支援）。"
+        if request.chat_only:
+            raise RuntimeError(reason)
+        self.log_message.emit(reason)
+        return "（此影片沒有聊天室紀錄）"
 
     def do_download(self):
         request = self.params["request"]
@@ -361,6 +406,7 @@ class TaskWorker(QtCore.QThread):
         reader = threading.Thread(target=read_output, daemon=True)
         reader.start()
         ended = False
+        finished = False
         try:
             while not ended:
                 self.check_cancelled()
@@ -382,11 +428,18 @@ class TaskWorker(QtCore.QThread):
             self.check_cancelled()
             if process.returncode:
                 raise RuntimeError(f"下載失敗，工具退出碼 {process.returncode}：\n" + "\n".join(tail)[-4000:])
+            finished = True
+            note = self._finish_chat(request, self.check_cancelled)
             self.progress_changed.emit(100, "下載完成")
-            return {"files": self._files, "metadata": self._metadata}, "下載完成！"
+            return {"files": self._files, "metadata": self._metadata}, "下載完成！" + note
         finally:
             if process.poll() is None:
                 self._stop_process(process)
             reader.join(timeout=2)
             process.stdout.close()
             self._proc = None
+            if not finished and self.cancel_event.is_set() and self._chat_files:
+                try:
+                    self._finish_chat(request)
+                except Exception as error:
+                    self.log_message.emit(f"保留聊天室紀錄失敗：{error}")

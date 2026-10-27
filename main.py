@@ -147,6 +147,23 @@ class YtDlpGui(QtWidgets.QWidget):
         self.estimate_label.setWordWrap(True)
         layout.addWidget(self.estimate_label)
 
+        self.chat_group = QtWidgets.QGroupBox("直播聊天室（YouTube 直播／首播）")
+        chat_layout = QtWidgets.QVBoxLayout(self.chat_group)
+        self.chat_checkbox = QtWidgets.QCheckBox("下載直播聊天室紀錄")
+        self.chat_only_checkbox = QtWidgets.QCheckBox("只下載聊天室（不下載影片）")
+        self.chat_text_checkbox = QtWidgets.QCheckBox("另存易讀文字檔（.txt，含時間、名稱、Super Chat 金額）")
+        self.chat_text_checkbox.setChecked(True)
+        for checkbox in (self.chat_checkbox, self.chat_only_checkbox, self.chat_text_checkbox):
+            chat_layout.addWidget(checkbox)
+        chat_hint = QtWidgets.QLabel("原始紀錄存為 .live_chat.json。直播進行中請使用「只下載聊天室」，"
+                                     "會持續記錄到直播結束；中途按取消也會保留已錄到的留言。")
+        chat_hint.setObjectName("note")
+        chat_hint.setWordWrap(True)
+        chat_layout.addWidget(chat_hint)
+        layout.addWidget(self.chat_group)
+        self.chat_checkbox.toggled.connect(self.toggle_chat)
+        self.chat_only_checkbox.toggled.connect(self.toggle_chat)
+
         action_row = QtWidgets.QHBoxLayout()
         self.download_btn = QtWidgets.QPushButton("下載影片")
         self.download_btn.setObjectName("download_btn")
@@ -241,6 +258,7 @@ class YtDlpGui(QtWidgets.QWidget):
         layout.addStretch()
         self.toggle_time_group()
         self.toggle_mode()
+        self.toggle_chat()
         self.refresh_queue()
 
     def restore_settings(self):
@@ -254,16 +272,22 @@ class YtDlpGui(QtWidgets.QWidget):
         self.merge_checkbox.setChecked(self.settings.value("merge", True, type=bool))
         self.playlist_checkbox.setChecked(self.settings.value("playlist", False, type=bool))
         self.log_checkbox.setChecked(self.settings.value("show_log", False, type=bool))
+        self.chat_checkbox.setChecked(self.settings.value("chat", False, type=bool))
+        self.chat_only_checkbox.setChecked(self.settings.value("chat_only", False, type=bool))
+        self.chat_text_checkbox.setChecked(self.settings.value("chat_text", True, type=bool))
         geometry = self.settings.value("geometry")
         if geometry:
             self.restoreGeometry(geometry)
         self.toggle_mode()
+        self.toggle_chat()
 
     def save_settings(self):
         for name, value in (("folder", self.path_input.text()), ("ffmpeg_dir", self.ffmpeg_input.text()),
                             ("format", self.fmt_combo.currentText()), ("advanced", self.advanced_mode_radio.isChecked()),
                             ("merge", self.merge_checkbox.isChecked()), ("playlist", self.playlist_checkbox.isChecked()),
-                            ("show_log", self.log_checkbox.isChecked()), ("geometry", self.saveGeometry())):
+                            ("show_log", self.log_checkbox.isChecked()), ("chat", self.chat_checkbox.isChecked()),
+                            ("chat_only", self.chat_only_checkbox.isChecked()),
+                            ("chat_text", self.chat_text_checkbox.isChecked()), ("geometry", self.saveGeometry())):
             self.settings.setValue(name, value)
         self.settings.sync()
 
@@ -274,6 +298,20 @@ class YtDlpGui(QtWidgets.QWidget):
         simple = self.simple_mode_radio.isChecked()
         self.simple_panel.setVisible(simple)
         self.advanced_fmt_group.setVisible(not simple)
+        self.update_estimate()
+
+    def toggle_chat(self):
+        if not hasattr(self, "chat_checkbox"):
+            return
+        chat = self.chat_checkbox.isChecked()
+        self.chat_only_checkbox.setEnabled(chat)
+        self.chat_text_checkbox.setEnabled(chat)
+        chat_only = chat and self.chat_only_checkbox.isChecked()
+        # 只下載聊天室時，片段與影音格式設定都不會使用。
+        for widget in (self.mode_group, self.simple_mode_radio, self.advanced_mode_radio,
+                       self.simple_panel, self.advanced_fmt_group):
+            widget.setEnabled(not chat_only)
+        self.download_btn.setText("下載聊天室" if chat_only else "下載影片")
         self.update_estimate()
 
     def choose_folder(self):
@@ -293,7 +331,10 @@ class YtDlpGui(QtWidgets.QWidget):
                                     video_id=self.video_combo.currentData() or "", audio_id=self.audio_combo.currentData() or "",
                                     merge=self.merge_checkbox.isChecked(), playlist=self.playlist_checkbox.isChecked(),
                                     clip=self.clip_radio.isChecked(), start=self.start_input.text().strip(),
-                                    end=self.end_input.text().strip(), ffmpeg_dir=self.ffmpeg_input.text().strip())
+                                    end=self.end_input.text().strip(), ffmpeg_dir=self.ffmpeg_input.text().strip(),
+                                    chat=self.chat_checkbox.isChecked(),
+                                    chat_only=self.chat_checkbox.isChecked() and self.chat_only_checkbox.isChecked(),
+                                    chat_text=self.chat_text_checkbox.isChecked())
 
     def url_changed(self):
         url = self.url_input.text().strip()
@@ -387,7 +428,7 @@ class YtDlpGui(QtWidgets.QWidget):
         request = self.current_request()
         info = self._cache.get(request.url)
         core.validate_request(request, info)
-        if request.mode == "advanced" and self._info_url != request.url:
+        if request.mode == "advanced" and not request.chat_only and self._info_url != request.url:
             raise ValueError("網址已變更，請先重新取得格式清單。")
         return request, info
 
@@ -485,7 +526,8 @@ class YtDlpGui(QtWidgets.QWidget):
     def add_to_queue(self):
         try:
             request, info = self._validated_request()
-            item = QtWidgets.QListWidgetItem(f"{request.mode.upper()} | {request.url}")
+            kind = "聊天室" if request.chat_only else request.mode.upper() + ("＋聊天室" if request.chat else "")
+            item = QtWidgets.QListWidgetItem(f"{kind} | {request.url}")
             item.setData(QtCore.Qt.UserRole, (request, info))
             self.queue_list.addItem(item)
             self.refresh_queue()
