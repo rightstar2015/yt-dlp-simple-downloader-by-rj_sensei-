@@ -23,10 +23,10 @@
 1. 克隆倉庫
 2. 建立虛擬環境：`python -m venv .venv`
 3. 啟動虛擬環境
-4. 安裝依賴：`pip install -r requirements.txt`
+4. 安裝依賴：`pip install -r requirements.txt -r requirements-build.txt`
 
 ### 代碼規範
-- 使用 Python 3.8+ 語法
+- 使用 Python 3.10+ 語法
 - 遵循 PEP 8 風格指南
 - 為新功能添加註釋
 
